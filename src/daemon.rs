@@ -23,8 +23,10 @@
 //! # Shutdown
 //!
 //! Signal handlers only set an `AtomicBool`. Listeners use short socket
-//! timeouts (or non-blocking accept) and poll it. On shutdown they stop
-//! reading, emit any partially buffered TCP frame, and exit, dropping their
+//! timeouts (or non-blocking accept) and poll it. On shutdown the TCP
+//! listener accepts whatever is still in its backlog, and every connection
+//! reads what the kernel has already buffered (bounded) without waiting for
+//! more, then emits any partial frame. Listeners then exit, dropping their
 //! channel senders; the writer drains what is queued, flushes, and exits.
 
 use std::io::{ErrorKind, Read};
@@ -48,6 +50,8 @@ use crate::{debug, error, info, warn};
 const POLL: Duration = Duration::from_millis(200);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 const TCP_READ_BUF: usize = 16 * 1024;
+/// Per connection, how much already-received data is still read at shutdown.
+const SHUTDOWN_DRAIN_BYTES: usize = 1024 * 1024;
 /// Largest possible UDP payload (IPv4 65507, IPv6 non-jumbo 65527) fits.
 const UDP_RECV_BUF: usize = 65_536;
 
@@ -332,27 +336,18 @@ fn tcp_accept_loop(
             }
         };
 
-        conns.retain(|h| !h.is_finished());
-        if conns.len() >= max_connections {
-            shared.stats.tcp_rejected.fetch_add(1, Ordering::Relaxed);
-            warn!("tcp: rejecting {peer}: max_connections ({max_connections}) reached");
-            continue; // dropping `stream` closes it
-        }
-        let setup = stream
-            .set_nonblocking(false)
-            .and_then(|()| stream.set_read_timeout(Some(POLL)));
-        if let Err(e) = setup {
-            warn!("tcp: cannot configure connection from {peer}: {e}");
-            continue;
-        }
+        start_conn(stream, peer, max_connections, &mut conns, &tx, &shared);
+    }
 
-        debug!("tcp: connection from {peer}");
-        let (tx, shared) = (tx.clone(), shared.clone());
-        match spawn("berlog-tcp-conn", move || {
-            tcp_conn(stream, peer, tx, shared)
-        }) {
-            Ok(h) => conns.push(h),
-            Err(e) => warn!("tcp: {e}"),
+    // Connections the kernel completed but we had not accepted yet may
+    // already carry data; take them so a graceful stop loses nothing that
+    // was sent before it. Their threads see the shutdown flag and only drain.
+    for _ in 0..max_connections {
+        match listener.accept() {
+            Ok((stream, peer)) => {
+                start_conn(stream, peer, max_connections, &mut conns, &tx, &shared)
+            }
+            Err(_) => break,
         }
     }
 
@@ -360,6 +355,38 @@ fn tcp_accept_loop(
         let _ = h.join();
     }
     debug!("tcp listener stopped");
+}
+
+fn start_conn(
+    stream: TcpStream,
+    peer: SocketAddr,
+    max_connections: usize,
+    conns: &mut Vec<JoinHandle<()>>,
+    tx: &SyncSender<Message>,
+    shared: &Arc<Shared>,
+) {
+    conns.retain(|h| !h.is_finished());
+    if conns.len() >= max_connections {
+        shared.stats.tcp_rejected.fetch_add(1, Ordering::Relaxed);
+        warn!("tcp: rejecting {peer}: max_connections ({max_connections}) reached");
+        return; // dropping `stream` closes it
+    }
+    let setup = stream
+        .set_nonblocking(false)
+        .and_then(|()| stream.set_read_timeout(Some(POLL)));
+    if let Err(e) = setup {
+        warn!("tcp: cannot configure connection from {peer}: {e}");
+        return;
+    }
+
+    debug!("tcp: connection from {peer}");
+    let (tx, shared) = (tx.clone(), shared.clone());
+    match spawn("berlog-tcp-conn", move || {
+        tcp_conn(stream, peer, tx, shared)
+    }) {
+        Ok(h) => conns.push(h),
+        Err(e) => warn!("tcp: {e}"),
+    }
 }
 
 fn tcp_conn(mut stream: TcpStream, peer: SocketAddr, tx: SyncSender<Message>, shared: Arc<Shared>) {
@@ -385,14 +412,33 @@ fn tcp_conn(mut stream: TcpStream, peer: SocketAddr, tx: SyncSender<Message>, sh
         }
     };
 
+    let mut eof = false;
     while open && !shared.shutting_down() {
         match stream.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                eof = true;
+                break;
+            }
             Ok(n) => framer.push(&buf[..n], |f| deliver(f, &mut open)),
             Err(e) if is_timeout(&e) => {}
             Err(e) => {
                 debug!("tcp: {peer}: read error: {e}");
+                eof = true;
                 break;
+            }
+        }
+    }
+    // On shutdown, take what the kernel has already buffered for us, without
+    // waiting for more and bounded so a fast sender cannot stall the exit.
+    if open && !eof && stream.set_nonblocking(true).is_ok() {
+        let mut budget = SHUTDOWN_DRAIN_BYTES;
+        while open && budget > 0 {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    budget = budget.saturating_sub(n);
+                    framer.push(&buf[..n], |f| deliver(f, &mut open));
+                }
             }
         }
     }
