@@ -1,0 +1,8 @@
+# The one place the Rust toolchain is pinned. CI, the release workflow and
+# local builds (via rustup) all use it, so the merge gate and the release gate
+# compile with the same compiler. Keep the minor version in step with the
+# `rust:1.xx-alpine` builder image in the Dockerfile.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
