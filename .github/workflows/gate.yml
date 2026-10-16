@@ -1,0 +1,23 @@
+# The merge gate and the release gate. Called by ci.yml (pull requests and
+# main) and release.yml (tags), so both run exactly the same checks with the
+# same runner image and the toolchain pinned in rust-toolchain.toml.
+name: Gate
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  gate:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked

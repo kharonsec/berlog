@@ -5,24 +5,19 @@ on:
     branches: [main]
   pull_request:
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+  gate:
+    uses: ./.github/workflows/gate.yml
 
   docker:
-    runs-on: ubuntu-latest
+    name: docker build (amd64)
+    runs-on: ubuntu-24.04
+    permissions: {}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: docker build -t berlog:ci .
       - run: docker run --rm berlog:ci --version
