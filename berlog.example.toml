@@ -22,6 +22,9 @@ enabled = true
 address = "0.0.0.0:5514"
 # Further connections are accepted and immediately closed.
 max_connections = 256
+# Close connections that send nothing for this long (seconds). A partially
+# received frame on an idle connection is discarded. 0 disables.
+idle_timeout_secs = 300
 
 # Per-source-IP token bucket. Omit the section (or set enabled = false) to
 # disable rate limiting, which is the default.

@@ -126,6 +126,7 @@ A fully commented example is in [`berlog.example.toml`](berlog.example.toml).
 | `enabled` | `true` | |
 | `address` | `"0.0.0.0:5514"` | `IP:port`. |
 | `max_connections` | `256` | Connections beyond this are accepted and closed immediately. |
+| `idle_timeout_secs` | `300` | Close a connection that sends nothing for this many seconds; any partially received frame is discarded. `0` disables the timeout. |
 
 At least one of UDP and TCP must be enabled.
 

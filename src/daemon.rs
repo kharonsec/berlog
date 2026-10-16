@@ -15,6 +15,11 @@
 //! writer thread owns every output, so sinks need no locking and per-file
 //! ordering is preserved. The writer flushes whenever the channel drains.
 //!
+//! Idle TCP connections (no bytes for `tcp.idle_timeout_secs`) are closed and
+//! any partial frame is discarded, so silent peers cannot pin connection
+//! slots. The check runs on the read-timeout tick, so closure happens within
+//! one poll interval (200 ms) after the deadline.
+//!
 //! Backpressure: TCP connection threads block on a full channel, which
 //! stalls the TCP stream and pushes back on the sender. The UDP thread never
 //! blocks; if the channel is full it drops and counts, since the kernel
@@ -30,7 +35,7 @@
 //! channel senders; the writer drains what is queued, flushes, and exits.
 
 use std::io::{ErrorKind, Read};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -76,6 +81,7 @@ struct Shared {
     signals: Signals,
     limiter: Option<RateLimiter>,
     max_message_size: usize,
+    tcp_idle_timeout: Option<Duration>,
     stats: Arc<Stats>,
 }
 
@@ -162,6 +168,7 @@ pub fn run_with(
         signals: signals.clone(),
         limiter,
         max_message_size,
+        tcp_idle_timeout: tcp_cfg.as_ref().and_then(|t| t.idle_timeout),
         stats: stats.clone(),
     });
     let (tx, rx) = mpsc::sync_channel::<Message>(queue_size);
@@ -413,14 +420,29 @@ fn tcp_conn(mut stream: TcpStream, peer: SocketAddr, tx: SyncSender<Message>, sh
     };
 
     let mut eof = false;
+    let mut last_data = Instant::now();
     while open && !shared.shutting_down() {
         match stream.read(&mut buf) {
             Ok(0) => {
                 eof = true;
                 break;
             }
-            Ok(n) => framer.push(&buf[..n], |f| deliver(f, &mut open)),
-            Err(e) if is_timeout(&e) => {}
+            Ok(n) => {
+                last_data = Instant::now();
+                framer.push(&buf[..n], |f| deliver(f, &mut open));
+            }
+            Err(e) if is_timeout(&e) => {
+                if shared
+                    .tcp_idle_timeout
+                    .is_some_and(|t| last_data.elapsed() >= t)
+                {
+                    // An idle peer gets no partial-frame delivery: whatever
+                    // it left half-sent is discarded, not guessed at.
+                    info!("tcp: closing idle connection from {peer}");
+                    let _ = stream.shutdown(Shutdown::Both);
+                    return;
+                }
+            }
             Err(e) => {
                 debug!("tcp: {peer}: read error: {e}");
                 eof = true;

@@ -402,3 +402,113 @@ fn works_with_util_linux_logger() {
     assert_eq!(b["parse_status"], "rfc3164");
     assert_eq!(b["appname"], "lg");
 }
+
+// ---------------------------------------------------------------- idle timeout
+
+fn idle_daemon(name: &str, secs: u64) -> Daemon {
+    Daemon::start_raw(
+        name,
+        &format!(
+            r#"
+            [udp]
+            enabled = false
+            [tcp]
+            address = "127.0.0.1:0"
+            idle_timeout_secs = {secs}
+            [default]
+            outputs = [{{ type = "file", path = "{{dir}}/all.jsonl" }}]
+            "#
+        ),
+    )
+}
+
+/// True if the peer has closed the connection (read returns EOF or reset).
+fn peer_closed(s: &mut TcpStream) -> bool {
+    s.set_nonblocking(true).unwrap();
+    let mut buf = [0u8; 1];
+    let closed = match s.read(&mut buf) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    s.set_nonblocking(false).unwrap();
+    closed
+}
+
+#[test]
+fn idle_connection_is_closed_and_partial_frame_discarded() {
+    let d = idle_daemon("idle-close", 1);
+    let mut s = tcp(&d);
+    let start = std::time::Instant::now();
+    s.write_all(b"<13>1 - h a - - - half-sent, no LF").unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut buf = [0u8; 1];
+    let n = s.read(&mut buf).unwrap_or(0);
+    let waited = start.elapsed();
+    assert_eq!(n, 0, "expected EOF from the daemon");
+    assert!(
+        waited >= Duration::from_millis(900) && waited < Duration::from_secs(4),
+        "closed after {waited:?}"
+    );
+    d.wait_for_stderr("tcp: closing idle connection from 127.0.0.1");
+    let path = d.path("all.jsonl");
+    let (status, _, stderr) = d.stop();
+    assert!(status.success());
+    assert!(stderr.contains("received=0"), "{stderr}");
+    let lines = read_lines(&path);
+    assert!(
+        lines.is_empty(),
+        "partial frame must be discarded: {lines:?}"
+    );
+}
+
+#[test]
+fn connection_that_keeps_sending_is_never_closed() {
+    let d = idle_daemon("idle-busy", 1);
+    let mut s = tcp(&d);
+    // 3.5 s of traffic every 250 ms: well past the 1 s timeout in total.
+    for i in 0..14 {
+        s.write_all(format!("<13>1 - h a - - - busy {i}\n").as_bytes())
+            .unwrap();
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(!peer_closed(&mut s));
+    let lines = wait_lines(&d.path("all.jsonl"), 14);
+    assert_eq!(lines.len(), 14);
+    assert!(!d.stderr_text().contains("closing idle connection"));
+    drop(s);
+    assert!(d.stop().0.success());
+}
+
+#[test]
+fn connection_survives_idle_period_shorter_than_timeout() {
+    let d = idle_daemon("idle-gap", 2);
+    let mut s = tcp(&d);
+    for i in 0..3 {
+        s.write_all(format!("<13>1 - h a - - - gap {i}\n").as_bytes())
+            .unwrap();
+        // Idle for most, but not all, of the 2 s timeout.
+        thread::sleep(Duration::from_millis(1400));
+    }
+    assert!(!peer_closed(&mut s));
+    s.write_all(b"<13>1 - h a - - - after gaps\n").unwrap();
+    let lines = wait_lines(&d.path("all.jsonl"), 4);
+    assert!(lines[3].contains("after gaps"), "{lines:?}");
+    assert!(!d.stderr_text().contains("closing idle connection"));
+    drop(s);
+    assert!(d.stop().0.success());
+}
+
+#[test]
+fn idle_timeout_zero_disables_it() {
+    let d = idle_daemon("idle-off", 0);
+    let mut s = tcp(&d);
+    thread::sleep(Duration::from_millis(2500));
+    assert!(!peer_closed(&mut s));
+    s.write_all(b"<13>1 - h a - - - still here\n").unwrap();
+    let lines = wait_lines(&d.path("all.jsonl"), 1);
+    assert!(lines[0].contains("still here"));
+    assert!(!d.stderr_text().contains("closing idle connection"));
+    drop(s);
+    assert!(d.stop().0.success());
+}

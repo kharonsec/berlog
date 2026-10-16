@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use regex::Regex;
 use serde::Deserialize;
@@ -34,6 +35,8 @@ pub struct Config {
 pub struct TcpConfig {
     pub address: SocketAddr,
     pub max_connections: usize,
+    /// Close a connection that sends nothing for this long. `None` disables.
+    pub idle_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -153,6 +156,7 @@ struct RawTcp {
     enabled: bool,
     address: String,
     max_connections: usize,
+    idle_timeout_secs: u64,
 }
 
 impl Default for RawTcp {
@@ -161,6 +165,7 @@ impl Default for RawTcp {
             enabled: true,
             address: DEFAULT_ADDRESS.into(),
             max_connections: 256,
+            idle_timeout_secs: 300,
         }
     }
 }
@@ -266,6 +271,8 @@ impl Config {
             Some(TcpConfig {
                 address: parse_addr("tcp.address", &raw.tcp.address)?,
                 max_connections: raw.tcp.max_connections,
+                idle_timeout: (raw.tcp.idle_timeout_secs > 0)
+                    .then(|| Duration::from_secs(raw.tcp.idle_timeout_secs)),
             })
         } else {
             None
@@ -441,6 +448,10 @@ mod tests {
         let c = Config::from_toml("").unwrap();
         assert_eq!(c.udp, Some(DEFAULT_ADDRESS.parse().unwrap()));
         assert_eq!(c.tcp.as_ref().unwrap().max_connections, 256);
+        assert_eq!(
+            c.tcp.as_ref().unwrap().idle_timeout,
+            Some(Duration::from_secs(300))
+        );
         assert_eq!(c.max_message_size, 65536);
         assert!(c.rate_limit.is_none());
         assert!(c.rules.is_empty());
@@ -539,6 +550,15 @@ mod tests {
             }]
         );
         assert_eq!(c.all_outputs().len(), 4);
+    }
+
+    #[test]
+    fn tcp_idle_timeout() {
+        let c = Config::from_toml("[tcp]\nidle_timeout_secs = 2").unwrap();
+        assert_eq!(c.tcp.unwrap().idle_timeout, Some(Duration::from_secs(2)));
+        let c = Config::from_toml("[tcp]\nidle_timeout_secs = 0").unwrap();
+        assert_eq!(c.tcp.unwrap().idle_timeout, None);
+        bad("[tcp]\nidle_timeout_secs = -1", "invalid TOML");
     }
 
     #[test]
