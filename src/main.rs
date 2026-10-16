@@ -1,3 +1,3 @@
-fn main() {
-    println!("Hello, world!");
-}
+#![forbid(unsafe_code)]
+
+fn main() {}
