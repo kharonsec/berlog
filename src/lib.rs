@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod framing;
 pub mod message;
 pub mod parse;
