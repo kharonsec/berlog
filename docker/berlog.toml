@@ -1,0 +1,13 @@
+# Default configuration baked into the container image.
+# Mount your own over /etc/berlog/berlog.toml to customize.
+
+[udp]
+address = "0.0.0.0:5514"
+
+[tcp]
+address = "0.0.0.0:5514"
+
+[default]
+outputs = [
+  { type = "file", path = "/var/log/berlog/messages.jsonl", format = "jsonl" },
+]
