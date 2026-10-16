@@ -8,6 +8,7 @@
 pub mod diag;
 
 pub mod config;
+pub mod daemon;
 pub mod framing;
 pub mod message;
 pub mod output;
