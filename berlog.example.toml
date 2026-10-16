@@ -1,0 +1,72 @@
+# berlog example configuration.
+#
+# Copy to /etc/berlog/berlog.toml (or pass with -c) and adjust.
+# Check it with:  berlog -t -c /etc/berlog/berlog.toml
+#
+# Every key shown here is optional; the values below are the defaults unless
+# marked otherwise. Unknown keys are rejected.
+
+[server]
+# Largest accepted payload in bytes. Longer UDP datagrams and TCP frames are
+# cut to this size and marked "truncated". Range: 480 .. 16777216.
+max_message_size = 65536
+# Messages buffered between listeners and the writer thread.
+queue_size = 10000
+
+[udp]
+enabled = true
+address = "0.0.0.0:5514"
+
+[tcp]
+enabled = true
+address = "0.0.0.0:5514"
+# Further connections are accepted and immediately closed.
+max_connections = 256
+
+# Per-source-IP token bucket. Omit the section (or set enabled = false) to
+# disable rate limiting, which is the default.
+[rate_limit]
+enabled = true
+messages_per_second = 1000
+burst = 5000
+
+# Rules are evaluated in order. A message goes to the outputs of every rule
+# it matches, unless a matching rule has `stop = true`. Messages that match
+# no rule go to [default].
+#
+# Criteria (all optional, all must match):
+#   facility = "auth" or ["auth", "authpriv"]
+#   severity = "warning"   -> warning or more severe (emerg..warning)
+#   severity = "=warning"  -> exactly warning
+#   hostname = "regex"     -> matched against HOSTNAME, or the source IP if
+#                             the message has none
+#   appname  = "regex"     -> never matches a message without APP-NAME
+
+[[rule]]
+name = "auth"
+facility = ["auth", "authpriv"]
+outputs = [
+  { type = "file", path = "/var/log/berlog/auth.log", format = "text" },
+]
+
+[[rule]]
+name = "critical"
+severity = "crit"
+outputs = [
+  { type = "file", path = "/var/log/berlog/critical.jsonl", format = "jsonl" },
+  { type = "stdout", format = "text" },
+]
+
+[[rule]]
+name = "noisy-firewall"
+hostname = '^fw\d+\.example\.net$'
+appname = "^kernel$"
+stop = true
+outputs = [
+  { type = "file", path = "/var/log/berlog/firewall.jsonl" },
+]
+
+[default]
+outputs = [
+  { type = "file", path = "/var/log/berlog/messages.jsonl", format = "jsonl" },
+]
