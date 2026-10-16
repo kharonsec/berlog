@@ -162,11 +162,9 @@ fn split_tag(s: &str) -> Option<(&str, Option<&str>, &str)> {
         pid = Some(p);
         rest = &r[close + 1..];
         rest = rest.strip_prefix(':').unwrap_or(rest);
-    } else if let Some(r) = rest.strip_prefix(':') {
-        rest = r;
     } else {
-        // A bare word followed by a space is just message text.
-        return None;
+        // Without a colon, a bare word followed by a space is just text.
+        rest = rest.strip_prefix(':')?;
     }
     Some((tag, pid, rest.strip_prefix(' ').unwrap_or(rest)))
 }
