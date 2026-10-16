@@ -1,0 +1,22 @@
+[package]
+name = "berlog"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A minimal, modern syslog daemon: UDP/TCP listeners, RFC 3164/5424 parsing, rule-based routing to files and stdout."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["syslog", "syslogd", "logging", "daemon", "siem"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+regex = { version = "1.13", default-features = false, features = ["std", "perf", "unicode"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+signal-hook = { version = "0.4", default-features = false }
+toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
